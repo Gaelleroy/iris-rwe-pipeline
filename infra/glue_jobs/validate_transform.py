@@ -16,9 +16,20 @@ from __future__ import annotations
 
 import json
 import sys
+import zipfile
 
+import boto3
 from awsglue.utils import getResolvedOptions  # provided by the Glue runtime
 
+# Bootstrap: fetch and unpack src/ ourselves rather than relying on
+# --extra-py-files. Glue Python Shell only reliably accepts .egg/.whl there; a
+# plain .zip may or may not land on sys.path depending on the runtime. Doing it
+# explicitly is deterministic and needs no wheel build.
+_args = getResolvedOptions(sys.argv, ["config_s3_uri", "bucket", "run_id"])
+_s3 = boto3.client("s3")
+_s3.download_file(_args["bucket"], "code/src.zip", "/tmp/src.zip")
+with zipfile.ZipFile("/tmp/src.zip") as zf:
+    zf.extractall("/tmp")
 sys.path.insert(0, "/tmp")
 
 from src.ingest.land import land  # noqa: E402
@@ -31,13 +42,11 @@ RAW_TABLES = ["patients", "encounters", "diagnoses", "injections", "visual_acuit
 
 
 def main():
-    args = getResolvedOptions(sys.argv, ["config_s3_uri", "bucket", "run_id"])
+    args = _args
 
     # Pull the config from S3 so the job runs the same parameters the repo
     # declares - the job does not carry its own copy.
-    import boto3
-
-    s3 = boto3.client("s3")
+    s3 = _s3
     cfg_bucket, _, cfg_key = args["config_s3_uri"].replace("s3://", "").partition("/")
     s3.download_file(cfg_bucket, cfg_key, "/tmp/study.yaml")
 

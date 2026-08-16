@@ -6,7 +6,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "FunctionName": "${PREFLIGHT_FUNCTION_ARN}",
+        "FunctionName": "arn:aws:lambda:us-east-1:533267270245:function:iris-preflight",
         "Payload.$": "$"
       },
       "ResultSelector": {
@@ -51,7 +51,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "JobName": "${GLUE_JOB_NAME}",
+        "JobName": "iris-validate-transform",
         "Arguments": {
           "--config_s3_uri.$": "$.config_s3_uri",
           "--bucket.$": "$.bucket",
@@ -99,11 +99,11 @@
       "Parameters": {
         "QueryString.$": "$.cohort_sql",
         "QueryExecutionContext": {
-          "Database": "${ATHENA_DATABASE}"
+          "Database": "iris_rwe"
         },
-        "WorkGroup": "${ATHENA_WORKGROUP}",
+        "WorkGroup": "primary",
         "ResultConfiguration": {
-          "OutputLocation": "${ATHENA_OUTPUT_LOCATION}"
+          "OutputLocation": "s3://iris-rwe-gael-1786838804/athena-results/"
         }
       },
       "ResultPath": "$.athena",
@@ -133,7 +133,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
+        "TopicArn": "arn:aws:sns:us-east-1:533267270245:iris-pipeline-alerts",
         "Subject": "IRIS RWE pipeline succeeded",
         "Message.$": "States.Format('Run {} completed. Source file: s3://{}/{}. Cohort query: {}', $$.Execution.Name, $.bucket, $.key, $.athena.QueryExecution.QueryExecutionId)"
       },
@@ -143,7 +143,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
+        "TopicArn": "arn:aws:sns:us-east-1:533267270245:iris-pipeline-alerts",
         "Subject": "IRIS RWE pipeline halted: preflight",
         "Message.$": "States.Format('Run {} halted at preflight. File s3://{}/{} did not match the expected schema. This is an engineering issue - check whether the site changed its export format.', $$.Execution.Name, $.bucket, $.key)"
       },
@@ -153,7 +153,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
+        "TopicArn": "arn:aws:sns:us-east-1:533267270245:iris-pipeline-alerts",
         "Subject": "IRIS RWE pipeline halted: data quality gate",
         "Message.$": "States.Format('Run {} halted at the QC gate. The curated layer was NOT written and no cohort was built. See s3://{}/metadata/{}/validation_report.json. A clinical-plausibility failure needs a scientist, not an engineer.', $$.Execution.Name, $.bucket, $$.Execution.Name)"
       },
@@ -163,7 +163,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
+        "TopicArn": "arn:aws:sns:us-east-1:533267270245:iris-pipeline-alerts",
         "Subject": "IRIS RWE pipeline failed: cohort query",
         "Message.$": "States.Format('Run {} failed during cohort construction. Curated data is intact; the query itself failed.', $$.Execution.Name)"
       },
@@ -178,7 +178,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
+        "TopicArn": "arn:aws:sns:us-east-1:533267270245:iris-pipeline-alerts",
         "Subject": "IRIS RWE pipeline failed: job error",
         "Message.$": "States.Format('Run {} failed inside the validate/transform job for an infrastructure or code reason, not a data quality gate. Check the Glue job logs - this is an engineering issue.', $$.Execution.Name)"
       },

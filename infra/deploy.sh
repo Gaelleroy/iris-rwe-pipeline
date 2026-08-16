@@ -32,7 +32,8 @@ echo "$TOPIC_ARN"
 say "Package src/ and config for Glue"
 rm -rf build && mkdir -p build
 cp -r src build/src
-(cd build && zip -qr src.zip src)
+# python zipfile, not the zip binary: Git Bash on Windows has no zip
+python -c "import shutil; shutil.make_archive('build/src','zip','build','src')"
 aws s3 cp build/src.zip "s3://$BUCKET/code/src.zip" >/dev/null
 aws s3 cp infra/glue_jobs/validate_transform.py "s3://$BUCKET/code/validate_transform.py" >/dev/null
 aws s3 cp config/study.yaml "s3://$BUCKET/code/study.yaml" >/dev/null
@@ -50,7 +51,7 @@ aws iam put-role-policy --role-name $LAMBDA_ROLE --policy-name S3Read \
 LAMBDA_ROLE_ARN=$(aws iam get-role --role-name $LAMBDA_ROLE --query Role.Arn --output text)
 
 say "Lambda: preflight"
-(cd infra/lambda_preflight && zip -qr ../../build/preflight.zip handler.py)
+python -c "import zipfile; zipfile.ZipFile('build/preflight.zip','w',zipfile.ZIP_DEFLATED).write('infra/lambda_preflight/handler.py','handler.py')"
 if aws lambda get-function --function-name ${PREFIX}-preflight >/dev/null 2>&1; then
   aws lambda update-function-code --function-name ${PREFIX}-preflight \
     --zip-file fileb://build/preflight.zip >/dev/null
