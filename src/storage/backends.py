@@ -60,7 +60,8 @@ class StorageBackend(ABC):
         partition_by = list(partition_by or [])
         if not partition_by:
             buf = io.BytesIO()
-            df.to_parquet(buf, index=False)
+            df.to_parquet(buf, index=False, coerce_timestamps="ms",
+                          allow_truncated_timestamps=True)
             return self.write_bytes(key.rstrip("/") + "/part-0000.parquet", buf.getvalue())
 
         written = []
@@ -69,7 +70,12 @@ class StorageBackend(ABC):
             sub = "/".join(f"{col}={val}" for col, val in zip(partition_by, values))
             part_key = f"{key.rstrip('/')}/{sub}/part-0000.parquet"
             buf = io.BytesIO()
-            chunk.drop(columns=partition_by).to_parquet(buf, index=False)
+            # Millisecond precision, not pandas' default nanoseconds: the Glue
+            # crawler reads INT64 nanosecond timestamps as bigint, which
+            # silently breaks every DATE_DIFF in the cohort SQL.
+            chunk.drop(columns=partition_by).to_parquet(
+                buf, index=False, coerce_timestamps="ms", allow_truncated_timestamps=True
+            )
             written.append(self.write_bytes(part_key, buf.getvalue()))
         return self.uri(key)
 
