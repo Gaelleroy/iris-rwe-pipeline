@@ -5,3 +5,5 @@ __pycache__/
 .Rhistory
 .RData
 .env
+cohort_rendered.sql
+config/study.aws.yaml
