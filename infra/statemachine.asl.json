@@ -1,0 +1,159 @@
+{
+  "Comment": "IRIS RWE pipeline. Raw file arrives -> preflight -> validate/transform -> QC gate -> cohort -> notify. The gate is a real branch: a FAIL routes to the alert path and the cohort is never built.",
+  "StartAt": "Preflight",
+  "States": {
+    "Preflight": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${PREFLIGHT_FUNCTION_ARN}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "preflight.$": "$.Payload"
+      },
+      "ResultPath": "$.preflight",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyStructuralFailure"
+        }
+      ],
+      "Next": "PreflightGate"
+    },
+
+    "PreflightGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.preflight.preflight.status",
+          "StringEquals": "PASS",
+          "Next": "ValidateAndTransform"
+        }
+      ],
+      "Default": "NotifyStructuralFailure"
+    },
+
+    "ValidateAndTransform": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${GLUE_JOB_NAME}",
+        "Arguments": {
+          "--config_s3_uri.$": "$.config_s3_uri",
+          "--bucket.$": "$.bucket",
+          "--run_id.$": "$$.Execution.Name"
+        }
+      },
+      "ResultPath": "$.glue",
+      "Retry": [
+        {
+          "ErrorEquals": ["Glue.ConcurrentRunsExceededException", "Glue.InternalServiceException"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "Comment": "Transient service errors retry. A QC gate failure raises SystemExit inside the job, surfacing as Glue.JobRunFailed, which is deliberately NOT retried - rerunning bad data produces the same bad result."
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyQualityFailure"
+        }
+      ],
+      "Next": "BuildCohort"
+    },
+
+    "BuildCohort": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Parameters": {
+        "QueryString.$": "$.cohort_sql",
+        "QueryExecutionContext": {
+          "Database": "${ATHENA_DATABASE}"
+        },
+        "WorkGroup": "${ATHENA_WORKGROUP}",
+        "ResultConfiguration": {
+          "OutputLocation": "${ATHENA_OUTPUT_LOCATION}"
+        }
+      },
+      "ResultPath": "$.athena",
+      "Retry": [
+        {
+          "ErrorEquals": ["Athena.TooManyRequestsException", "Athena.InternalServerException"],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "NotifyQueryFailure"
+        }
+      ],
+      "Next": "NotifySuccess"
+    },
+
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Subject": "IRIS RWE pipeline succeeded",
+        "Message.$": "States.Format('Run {} completed. Source file: s3://{}/{}. Cohort query: {}', $$.Execution.Name, $.bucket, $.key, $.athena.QueryExecution.QueryExecutionId)"
+      },
+      "End": true
+    },
+
+    "NotifyStructuralFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Subject": "IRIS RWE pipeline halted: preflight",
+        "Message.$": "States.Format('Run {} halted at preflight. File s3://{}/{} did not match the expected schema. This is an engineering issue - check whether the site changed its export format.', $$.Execution.Name, $.bucket, $.key)"
+      },
+      "Next": "Halted"
+    },
+
+    "NotifyQualityFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Subject": "IRIS RWE pipeline halted: data quality gate",
+        "Message.$": "States.Format('Run {} halted at the QC gate. The curated layer was NOT written and no cohort was built. See s3://{}/metadata/{}/validation_report.json. A clinical-plausibility failure needs a scientist, not an engineer.', $$.Execution.Name, $.bucket, $$.Execution.Name)"
+      },
+      "Next": "Halted"
+    },
+
+    "NotifyQueryFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Subject": "IRIS RWE pipeline failed: cohort query",
+        "Message.$": "States.Format('Run {} failed during cohort construction. Curated data is intact; the query itself failed.', $$.Execution.Name)"
+      },
+      "Next": "Halted"
+    },
+
+    "Halted": {
+      "Type": "Fail",
+      "Error": "PipelineHalted",
+      "Cause": "The pipeline stopped before producing a cohort. See the SNS notification and the validation report for which gate failed."
+    }
+  }
+}
