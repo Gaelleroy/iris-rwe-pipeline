@@ -1,0 +1,109 @@
+study:
+  id: dme_antivegf_va_outcomes
+  version: v1
+  title: >-
+    Visual acuity outcomes at 12 months among adults with newly diagnosed
+    diabetic macular edema initiating anti-VEGF therapy
+  question: >-
+    Among adults with newly diagnosed DME initiating anti-VEGF therapy, what
+    patient and treatment factors are associated with visual acuity improvement
+    at 12 months, and how does time-to-improvement differ between Drug A and
+    Drug B?
+
+# ---------------------------------------------------------------------------
+# Storage backend. Flip `backend` to s3 to run the identical pipeline on AWS.
+# ---------------------------------------------------------------------------
+storage:
+  backend: local          # local | s3
+  local:
+    root: ./data
+  s3:
+    bucket: CHANGE-ME-iris-rwe-pipeline
+    prefix: ""
+    region: us-east-1
+
+query:
+  engine: duckdb          # duckdb | athena
+  athena:
+    database: iris_rwe
+    workgroup: primary
+    output_location: s3://CHANGE-ME-iris-rwe-pipeline/athena-results/
+
+# ---------------------------------------------------------------------------
+# Synthetic data generation. Defect rates are deliberate: every one of these
+# is caught by a named rule in src/validate/rules.py.
+# ---------------------------------------------------------------------------
+generate:
+  seed: 20260815
+  n_patients: 12000
+  # Real extracts are not pre-filtered to the eligible population. These are
+  # patients who appear in the same feed but do not qualify - without them the
+  # attrition table is vacuous and the cohort SQL is never actually tested.
+  n_no_dme_patients: 6000        # diabetic/ophthalmic care, no DME diagnosis
+  n_untreated_dme_patients: 2500 # DME diagnosed, never initiated anti-VEGF
+  n_other_drug_patients: 1200    # DME treated with a non-study drug
+  n_sites: 8
+  accrual_start: "2022-01-01"
+  accrual_end: "2024-06-30"
+  data_cutoff: "2025-12-31"
+  defects:
+    duplicate_injection_rate: 0.015
+    treatment_before_diagnosis_rate: 0.02
+    missing_followup_va_rate: 0.08
+    orphan_encounter_rate: 0.004
+    missing_sex_rate: 0.006
+    implausible_va_rate: 0.003
+    # site_id -> date format used in that site's export
+    date_format_by_site:
+      SITE_01: "%Y-%m-%d"
+      SITE_02: "%m/%d/%Y"
+      SITE_03: "%d-%b-%Y"
+      SITE_04: "%Y-%m-%d"
+      SITE_05: "%m/%d/%Y"
+      SITE_06: "%Y-%m-%d"
+      SITE_07: "%d-%b-%Y"
+      SITE_08: "%Y-%m-%d"
+    # this site adds an unexpected column partway through the year
+    schema_drift_site: SITE_05
+    schema_drift_date: "2023-07-01"
+
+# ---------------------------------------------------------------------------
+# Data quality gates. warn -> logged, fail -> pipeline halts.
+# ---------------------------------------------------------------------------
+validation:
+  thresholds:
+    missing_patient_id:            {warn: 0.000, fail: 0.001}
+    missing_birth_date:            {warn: 0.010, fail: 0.050}
+    missing_sex:                   {warn: 0.010, fail: 0.050}
+    duplicate_records:             {warn: 0.005, fail: 0.030}
+    orphan_encounters:             {warn: 0.001, fail: 0.010}
+    unparseable_dates:             {warn: 0.001, fail: 0.010}
+    treatment_before_diagnosis:    {warn: 0.010, fail: 0.050}
+    diagnosis_before_birth:        {warn: 0.000, fail: 0.001}
+    va_out_of_range:               {warn: 0.005, fail: 0.020}
+    followup_beyond_data_cutoff:   {warn: 0.000, fail: 0.001}
+
+# ---------------------------------------------------------------------------
+# Cohort definition. Mirrors docs/cohort_definition.md - keep them in sync.
+# ---------------------------------------------------------------------------
+cohort:
+  dme_icd10_prefixes: ["E11.311", "E11.321", "E11.331", "E11.341", "E11.351", "H35.81"]
+  exposure_medications: ["Drug A", "Drug B"]
+  index_definition: first_antivegf_injection_after_dme_diagnosis
+  min_age_at_index: 18
+  max_age_at_index: 95
+  washout_days: 365            # no prior anti-VEGF in the 12 mo before index
+  followup_days: 365
+  followup_window_tolerance_days: 90   # 12-mo VA measured within +/- 90 days
+  require_baseline_va: true
+  baseline_va_window_days: 30  # baseline VA within 30 days before/on index
+
+# ---------------------------------------------------------------------------
+# Analysis. Outcome is a >=0.1 logMAR gain (~5 ETDRS letters), the conventional
+# threshold for clinically meaningful improvement.
+# ---------------------------------------------------------------------------
+analysis:
+  outcome_logmar_improvement_threshold: 0.1
+  covariates: [age_at_index, sex, race, baseline_logmar, injection_count_yr1, site_volume_tertile]
+  reference_treatment: "Drug B"
+  alpha: 0.05

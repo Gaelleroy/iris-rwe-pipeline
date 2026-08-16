@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E402"]  # sys.path setup precedes imports in src/pipeline.py
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
