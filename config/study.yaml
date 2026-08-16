@@ -14,20 +14,20 @@ study:
 # Storage backend. Flip `backend` to s3 to run the identical pipeline on AWS.
 # ---------------------------------------------------------------------------
 storage:
-  backend: local          # local | s3
+  backend: s3          # local | s3
   local:
     root: ./data
   s3:
-    bucket: CHANGE-ME-iris-rwe-pipeline
+    bucket: iris-rwe-gael-1786838804
     prefix: ""
     region: us-east-1
 
 query:
-  engine: duckdb          # duckdb | athena
+  engine: athena          # duckdb | athena
   athena:
     database: iris_rwe
     workgroup: primary
-    output_location: s3://CHANGE-ME-iris-rwe-pipeline/athena-results/
+    output_location: s3://iris-rwe-gael-1786838804/athena-results/
 
 # ---------------------------------------------------------------------------
 # Synthetic data generation. Defect rates are deliberate: every one of these

@@ -66,7 +66,9 @@ class AthenaEngine:  # pragma: no cover - requires AWS
         self.database = acfg["database"]
         self.workgroup = acfg["workgroup"]
         self.output = acfg["output_location"]
-        self.client = boto3.client("athena", region_name=cfg["storage"]["s3"]["region"])
+        region = cfg["storage"]["s3"]["region"]
+        self.client = boto3.client("athena", region_name=region)
+        self.s3 = boto3.client("s3", region_name=region)
 
     def query(self, sql: str) -> pd.DataFrame:
         import time
@@ -84,8 +86,18 @@ class AthenaEngine:  # pragma: no cover - requires AWS
                 break
             time.sleep(1.5)
         if state != "SUCCEEDED":
-            raise RuntimeError(f"Athena query {qid} ended in state {state}")
-        return pd.read_csv(f"{self.output.rstrip('/')}/{qid}.csv")
+            reason = self.client.get_query_execution(QueryExecutionId=qid)[
+                "QueryExecution"]["Status"].get("StateChangeReason", "")
+            raise RuntimeError(f"Athena query {qid} ended in state {state}: {reason}")
+
+        # Read the result through boto3 rather than pd.read_csv("s3://..."),
+        # which needs fsspec + s3fs and would resolve credentials through a
+        # second, separate chain. We already hold an authenticated client.
+        import io
+
+        bucket, _, key = self.output.replace("s3://", "").partition("/")
+        obj = self.s3.get_object(Bucket=bucket, Key=f"{key.rstrip('/')}/{qid}.csv")
+        return pd.read_csv(io.BytesIO(obj["Body"].read()))
 
 
 def get_engine(cfg: dict, tables: dict[str, pd.DataFrame] | None = None):
