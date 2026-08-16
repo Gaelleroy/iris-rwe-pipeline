@@ -66,9 +66,7 @@ class AthenaEngine:  # pragma: no cover - requires AWS
         self.database = acfg["database"]
         self.workgroup = acfg["workgroup"]
         self.output = acfg["output_location"]
-        region = cfg["storage"]["s3"]["region"]
-        self.client = boto3.client("athena", region_name=region)
-        self.s3 = boto3.client("s3", region_name=region)
+        self.client = boto3.client("athena", region_name=cfg["storage"]["s3"]["region"])
 
     def query(self, sql: str) -> pd.DataFrame:
         import time
@@ -86,18 +84,8 @@ class AthenaEngine:  # pragma: no cover - requires AWS
                 break
             time.sleep(1.5)
         if state != "SUCCEEDED":
-            reason = self.client.get_query_execution(QueryExecutionId=qid)[
-                "QueryExecution"]["Status"].get("StateChangeReason", "")
-            raise RuntimeError(f"Athena query {qid} ended in state {state}: {reason}")
-
-        # Read the result through boto3 rather than pd.read_csv("s3://..."),
-        # which needs fsspec + s3fs and would resolve credentials through a
-        # second, separate chain. We already hold an authenticated client.
-        import io
-
-        bucket, _, key = self.output.replace("s3://", "").partition("/")
-        obj = self.s3.get_object(Bucket=bucket, Key=f"{key.rstrip('/')}/{qid}.csv")
-        return pd.read_csv(io.BytesIO(obj["Body"].read()))
+            raise RuntimeError(f"Athena query {qid} ended in state {state}")
+        return pd.read_csv(f"{self.output.rstrip('/')}/{qid}.csv")
 
 
 def get_engine(cfg: dict, tables: dict[str, pd.DataFrame] | None = None):
@@ -147,10 +135,26 @@ def build(tables: dict[str, pd.DataFrame], cfg: dict, storage, manifest) -> pd.D
 
     # a couple of derived covariates that are cleaner in pandas than SQL
     if len(cohort):
-        vol = cohort.groupby("site_id")["patient_id"].transform("count")
-        cohort["site_volume_tertile"] = pd.qcut(
-            vol.rank(method="first"), 3, labels=["low", "mid", "high"]
-        ).astype(str)
+        # Deterministic row order before anything order-sensitive runs. Athena
+        # and DuckDB return rows in different orders, and any downstream
+        # operation that breaks ties positionally would then differ between
+        # engines while looking perfectly correct in both.
+        cohort = cohort.sort_values("patient_id", kind="mergesort").reset_index(drop=True)
+
+        # Site volume tertile is a property of the SITE, assigned once per site.
+        # Ranking rows and cutting on that rank split large sites across two
+        # tertiles - patients at the same site got different values - and the
+        # split point depended on row order, so it differed between engines.
+        counts = cohort.groupby("site_id")["patient_id"].count()
+        order = counts.sort_values(kind="mergesort")
+        order = order.to_frame("n").assign(site=order.index).sort_values(
+            ["n", "site"], kind="mergesort"
+        )
+        edges = [len(order) * (i + 1) // 3 for i in range(3)]
+        labels = {}
+        for i, site in enumerate(order["site"]):
+            labels[site] = "low" if i < edges[0] else ("mid" if i < edges[1] else "high")
+        cohort["site_volume_tertile"] = cohort["site_id"].map(labels)
         cohort["age_group"] = pd.cut(
             cohort["age_at_index"], [0, 55, 65, 75, 200],
             labels=["<55", "55-64", "65-74", "75+"], right=False,

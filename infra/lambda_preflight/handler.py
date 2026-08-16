@@ -54,6 +54,71 @@ def _read_head(bucket: str, key: str, max_bytes: int = 1_000_000) -> str:
     return obj["Body"].read().decode("utf-8", errors="replace")
 
 
+def _check_one(bucket: str, key: str) -> dict:
+    """Validate a single raw CSV. Returns a per-table result block."""
+    result = {"key": key, "table": None, "status": "FAIL", "checks": []}
+
+    table = _table_from_key(key)
+    result["table"] = table
+    if table is None:
+        result["checks"].append({
+            "check": "recognised_table", "status": "FAIL",
+            "detail": f"key {key} does not map to a known table"})
+        return result
+
+    if not key.lower().endswith(".csv"):
+        result["checks"].append({
+            "check": "file_extension", "status": "FAIL",
+            "detail": "raw layer expects CSV"})
+        return result
+
+    try:
+        head = _read_head(bucket, key)
+    except Exception as exc:
+        result["checks"].append({
+            "check": "object_readable", "status": "FAIL", "detail": str(exc)[:200]})
+        return result
+
+    reader = csv.reader(io.StringIO(head))
+    try:
+        header = next(reader)
+    except StopIteration:
+        result["checks"].append({
+            "check": "readable_header", "status": "FAIL", "detail": "file is empty"})
+        return result
+
+    actual = {c.strip() for c in header}
+    expected = EXPECTED_COLUMNS[table]
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+
+    result["schema_fingerprint"] = hashlib.sha256(
+        "|".join(sorted(actual)).encode()).hexdigest()[:12]
+    result["checks"].append({
+        "check": "required_columns",
+        "status": "FAIL" if missing else "PASS",
+        "detail": f"missing={missing}"})
+    # Extra columns are schema drift, not corruption - a site added a field.
+    # Warn so someone looks; do not block the pipeline on it.
+    result["checks"].append({
+        "check": "no_unexpected_columns",
+        "status": "WARN" if unexpected else "PASS",
+        "detail": f"unexpected={unexpected}"})
+
+    rows = sum(1 for _ in reader)
+    truncated = len(head.encode()) >= 1_000_000
+    result["rows_sampled"] = rows
+    result["checks"].append({
+        "check": "minimum_rows",
+        "status": "PASS" if (rows >= MIN_ROWS or truncated) else "FAIL",
+        "detail": f"{rows} rows in sampled prefix (min {MIN_ROWS})"})
+
+    statuses = [c["status"] for c in result["checks"]]
+    result["status"] = "FAIL" if "FAIL" in statuses else "PASS"
+    result["warnings"] = [c["check"] for c in result["checks"] if c["status"] == "WARN"]
+    return result
+
+
 def handler(event, context):
     # Accept both a raw S3 event and a Step Functions passthrough
     if "detail" in event:                       # EventBridge
@@ -67,77 +132,24 @@ def handler(event, context):
         bucket = event["bucket"]
         key = event["key"]
 
-    result = {
+    # The trigger is a completion marker, not a data file. Its arrival means
+    # "all five extracts are uploaded" - so validate all of them, not the
+    # marker itself. Validating the marker was the original bug: a zero-byte
+    # object with no table name and no .csv extension fails every check.
+    if key.rsplit("/", 1)[-1] in ("_COMPLETE", "_SUCCESS"):
+        keys = [f"raw/{t}/{t}.csv" for t in sorted(EXPECTED_COLUMNS)]
+    else:
+        keys = [key]
+
+    tables = [_check_one(bucket, k) for k in keys]
+    statuses = [t["status"] for t in tables]
+    out = {
         "bucket": bucket,
         "key": key,
-        "table": None,
-        "status": "FAIL",
-        "checks": [],
+        "triggered_by_marker": len(keys) > 1,
+        "status": "FAIL" if "FAIL" in statuses else "PASS",
+        "tables": tables,
+        "warnings": sorted({w for t in tables for w in t.get("warnings", [])}),
     }
-
-    table = _table_from_key(key)
-    result["table"] = table
-
-    if table is None:
-        result["checks"].append({
-            "check": "recognised_table",
-            "status": "FAIL",
-            "detail": f"key {key} does not map to a known table",
-        })
-        return result
-
-    if not key.lower().endswith(".csv"):
-        result["checks"].append({
-            "check": "file_extension", "status": "FAIL",
-            "detail": "raw layer expects CSV",
-        })
-        return result
-
-    head = _read_head(bucket, key)
-    reader = csv.reader(io.StringIO(head))
-    try:
-        header = next(reader)
-    except StopIteration:
-        result["checks"].append({
-            "check": "readable_header", "status": "FAIL", "detail": "file is empty",
-        })
-        return result
-
-    actual = {c.strip() for c in header}
-    expected = EXPECTED_COLUMNS[table]
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-
-    result["schema_fingerprint"] = hashlib.sha256(
-        "|".join(sorted(actual)).encode()
-    ).hexdigest()[:12]
-
-    result["checks"].append({
-        "check": "required_columns",
-        "status": "FAIL" if missing else "PASS",
-        "detail": f"missing={missing}",
-    })
-    # Extra columns are schema drift, not corruption - the site added a field.
-    # Warn so someone looks, but do not block the pipeline on it.
-    result["checks"].append({
-        "check": "no_unexpected_columns",
-        "status": "WARN" if unexpected else "PASS",
-        "detail": f"unexpected={unexpected}",
-    })
-
-    rows = sum(1 for _ in reader)
-    truncated = len(head.encode()) >= 1_000_000
-    result["rows_sampled"] = rows
-    result["sample_truncated"] = truncated
-    result["checks"].append({
-        "check": "minimum_rows",
-        "status": "PASS" if (rows >= MIN_ROWS or truncated) else "FAIL",
-        "detail": f"{rows} rows in sampled prefix (min {MIN_ROWS})",
-    })
-
-    statuses = [c["status"] for c in result["checks"]]
-    result["status"] = "FAIL" if "FAIL" in statuses else "PASS"
-    result["warnings"] = [c["check"] for c in result["checks"] if c["status"] == "WARN"]
-
-    print(json.dumps(result))
-    return result
+    print(json.dumps(out))
+    return out

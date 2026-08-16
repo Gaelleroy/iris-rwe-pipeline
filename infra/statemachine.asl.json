@@ -1,5 +1,5 @@
 {
-  "Comment": "IRIS RWE pipeline. Raw file arrives -> preflight -> validate/transform -> QC gate -> cohort -> notify. The gate is a real branch: a FAIL routes to the alert path and the cohort is never built.",
+  "Comment": "IRIS RWE pipeline. A completion marker in raw/ triggers preflight -> validate/transform -> QC gate -> cohort + analysis -> notify. The execution input is only a bucket and a key; everything else is derived inside the pipeline so EventBridge can start it without a human.",
   "StartAt": "Preflight",
   "States": {
     "Preflight": {
@@ -51,14 +51,14 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "JobName": "${GLUE_JOB_NAME}",
+        "JobName": "${GLUE_VALIDATE_JOB}",
         "Arguments": {
-          "--config_s3_uri.$": "$.config_s3_uri",
+          "--config_s3_uri.$": "States.Format('s3://{}/code/study.yaml', $.bucket)",
           "--bucket.$": "$.bucket",
           "--run_id.$": "$$.Execution.Name"
         }
       },
-      "ResultPath": "$.glue",
+      "ResultPath": "$.glue_validate",
       "Retry": [
         {
           "ErrorEquals": [
@@ -68,20 +68,18 @@
           "IntervalSeconds": 30,
           "MaxAttempts": 3,
           "BackoffRate": 2.0,
-          "Comment": "Transient service errors retry. A QC gate failure raises SystemExit inside the job, surfacing as Glue.JobRunFailed, which is deliberately NOT retried - rerunning bad data produces the same bad result."
+          "Comment": "Transient service errors retry. A QC gate breach raises SystemExit inside the job and is deliberately not retried - rerunning the same data produces the same result."
         }
       ],
       "Catch": [
         {
           "ErrorEquals": [
             "Glue.AWSGlueException",
-            "Glue.ResourceNumberLimitExceededException",
-            "States.Timeout",
-            "States.TaskFailed"
+            "States.Timeout"
           ],
           "ResultPath": "$.error",
           "Next": "NotifyJobFailure",
-          "Comment": "Infrastructure or code errors are an engineering problem. Only a genuine QC gate breach should page a scientist."
+          "Comment": "Infrastructure and code errors are an engineering problem. Only a genuine QC breach should page a scientist."
         },
         {
           "ErrorEquals": [
@@ -91,29 +89,27 @@
           "Next": "NotifyQualityFailure"
         }
       ],
-      "Next": "BuildCohort"
+      "Next": "CohortAndAnalyze"
     },
-    "BuildCohort": {
+    "CohortAndAnalyze": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "QueryString.$": "$.cohort_sql",
-        "QueryExecutionContext": {
-          "Database": "${ATHENA_DATABASE}"
-        },
-        "WorkGroup": "${ATHENA_WORKGROUP}",
-        "ResultConfiguration": {
-          "OutputLocation": "${ATHENA_OUTPUT_LOCATION}"
+        "JobName": "${GLUE_ANALYZE_JOB}",
+        "Arguments": {
+          "--config_s3_uri.$": "States.Format('s3://{}/code/study.yaml', $.bucket)",
+          "--bucket.$": "$.bucket",
+          "--run_id.$": "$$.Execution.Name"
         }
       },
-      "ResultPath": "$.athena",
+      "ResultPath": "$.glue_analyze",
       "Retry": [
         {
           "ErrorEquals": [
-            "Athena.TooManyRequestsException",
-            "Athena.InternalServerException"
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException"
           ],
-          "IntervalSeconds": 10,
+          "IntervalSeconds": 30,
           "MaxAttempts": 3,
           "BackoffRate": 2.0
         }
@@ -124,7 +120,7 @@
             "States.ALL"
           ],
           "ResultPath": "$.error",
-          "Next": "NotifyQueryFailure"
+          "Next": "NotifyAnalysisFailure"
         }
       ],
       "Next": "NotifySuccess"
@@ -135,7 +131,7 @@
       "Parameters": {
         "TopicArn": "${SNS_TOPIC_ARN}",
         "Subject": "IRIS RWE pipeline succeeded",
-        "Message.$": "States.Format('Run {} completed. Source file: s3://{}/{}. Cohort query: {}', $$.Execution.Name, $.bucket, $.key, $.athena.QueryExecution.QueryExecutionId)"
+        "Message.$": "States.Format('Run {} completed. Triggered by s3://{}/{}. Results: s3://{}/results/{}/', $$.Execution.Name, $.bucket, $.key, $.bucket, $$.Execution.Name)"
       },
       "End": true
     },
@@ -145,7 +141,7 @@
       "Parameters": {
         "TopicArn": "${SNS_TOPIC_ARN}",
         "Subject": "IRIS RWE pipeline halted: preflight",
-        "Message.$": "States.Format('Run {} halted at preflight. File s3://{}/{} did not match the expected schema. This is an engineering issue - check whether the site changed its export format.', $$.Execution.Name, $.bucket, $.key)"
+        "Message.$": "States.Format('Run {} halted at preflight. s3://{}/{} did not match the expected schema. Engineering issue - check whether a site changed its export format.', $$.Execution.Name, $.bucket, $.key)"
       },
       "Next": "Halted"
     },
@@ -155,24 +151,9 @@
       "Parameters": {
         "TopicArn": "${SNS_TOPIC_ARN}",
         "Subject": "IRIS RWE pipeline halted: data quality gate",
-        "Message.$": "States.Format('Run {} halted at the QC gate. The curated layer was NOT written and no cohort was built. See s3://{}/metadata/{}/validation_report.json. A clinical-plausibility failure needs a scientist, not an engineer.', $$.Execution.Name, $.bucket, $$.Execution.Name)"
+        "Message.$": "States.Format('Run {} halted at the QC gate. The curated layer was NOT written and no cohort was built. See s3://{}/metadata/{}/validation_report.json. A clinical plausibility failure needs a scientist, not an engineer.', $$.Execution.Name, $.bucket, $$.Execution.Name)"
       },
       "Next": "Halted"
-    },
-    "NotifyQueryFailure": {
-      "Type": "Task",
-      "Resource": "arn:aws:states:::sns:publish",
-      "Parameters": {
-        "TopicArn": "${SNS_TOPIC_ARN}",
-        "Subject": "IRIS RWE pipeline failed: cohort query",
-        "Message.$": "States.Format('Run {} failed during cohort construction. Curated data is intact; the query itself failed.', $$.Execution.Name)"
-      },
-      "Next": "Halted"
-    },
-    "Halted": {
-      "Type": "Fail",
-      "Error": "PipelineHalted",
-      "Cause": "The pipeline stopped before producing a cohort. See the SNS notification and the validation report for which gate failed."
     },
     "NotifyJobFailure": {
       "Type": "Task",
@@ -180,9 +161,24 @@
       "Parameters": {
         "TopicArn": "${SNS_TOPIC_ARN}",
         "Subject": "IRIS RWE pipeline failed: job error",
-        "Message.$": "States.Format('Run {} failed inside the validate/transform job for an infrastructure or code reason, not a data quality gate. Check the Glue job logs - this is an engineering issue.', $$.Execution.Name)"
+        "Message.$": "States.Format('Run {} failed inside the validate/transform job for an infrastructure or code reason, not a data quality gate. Check the Glue job logs.', $$.Execution.Name)"
       },
       "Next": "Halted"
+    },
+    "NotifyAnalysisFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Subject": "IRIS RWE pipeline failed: cohort or analysis",
+        "Message.$": "States.Format('Run {} failed during cohort construction or analysis. Curated data is intact; the failure is downstream of it.', $$.Execution.Name)"
+      },
+      "Next": "Halted"
+    },
+    "Halted": {
+      "Type": "Fail",
+      "Error": "PipelineHalted",
+      "Cause": "The pipeline stopped before producing results. See the SNS notification and the validation report for which gate failed."
     }
   }
 }

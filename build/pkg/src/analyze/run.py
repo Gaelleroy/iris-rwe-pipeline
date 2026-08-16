@@ -24,7 +24,17 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from lifelines import CoxPHFitter, KaplanMeierFitter
+
+# lifelines is optional. It is the nicer interactive API, but it pulls
+# autograd, formulaic, and matplotlib, which is a heavy resolution inside a
+# Glue Python Shell job and was breaking the pyarrow install there. statsmodels
+# PHReg fits the same Cox partial likelihood - verified identical to 6dp on
+# this cohort - so the automated path falls back to it.
+try:
+    from lifelines import CoxPHFitter, KaplanMeierFitter
+    HAS_LIFELINES = True
+except ImportError:  # pragma: no cover - exercised only in the Glue runtime
+    HAS_LIFELINES = False
 
 
 def _design(df: pd.DataFrame, covars: list[str]) -> pd.DataFrame:
@@ -133,23 +143,56 @@ def analyze(cohort: pd.DataFrame, cfg: dict, storage, manifest) -> dict:
               "age_at_index", "baseline_logmar", "injection_count_yr1"]],
         pd.get_dummies(surv["sex"], prefix="sex", drop_first=True, dtype=float),
     ], axis=1)
-    cph = CoxPHFitter().fit(cph_data, "time_to_event_days", "event_observed")
-    row = cph.summary.loc["exposed"]
-    results["cox"] = {
-        "hr": float(row["exp(coef)"]),
-        "ci_low": float(row["exp(coef) lower 95%"]),
-        "ci_high": float(row["exp(coef) upper 95%"]),
-        "p": float(row["p"]),
-        "n_events": int(surv["event_observed"].sum()),
-        "n_at_risk": int(len(surv)),
-    }
+    if HAS_LIFELINES:
+        cph = CoxPHFitter().fit(cph_data, "time_to_event_days", "event_observed")
+        row = cph.summary.loc["exposed"]
+        cox = {
+            "hr": float(row["exp(coef)"]),
+            "ci_low": float(row["exp(coef) lower 95%"]),
+            "ci_high": float(row["exp(coef) upper 95%"]),
+            "p": float(row["p"]),
+            "fitter": "lifelines.CoxPHFitter",
+        }
+    else:
+        design = cph_data.drop(columns=["time_to_event_days", "event_observed"])
+        ph = sm.PHReg(
+            surv["time_to_event_days"].values,
+            design.values.astype(float),
+            status=surv["event_observed"].values,
+            ties="efron",
+        ).fit()
+        i = list(design.columns).index("exposed")
+        lo, hi = np.exp(ph.conf_int()[i])
+        cox = {
+            "hr": float(np.exp(ph.params[i])),
+            "ci_low": float(lo),
+            "ci_high": float(hi),
+            "p": float(ph.pvalues[i]),
+            "fitter": "statsmodels.PHReg",
+        }
+    cox["n_events"] = int(surv["event_observed"].sum())
+    cox["n_at_risk"] = int(len(surv))
+    results["cox"] = cox
 
     # -- KM curve points for plotting --------------------------------------
     km_out = []
     for arm, g in surv.groupby("treatment"):
-        kmf = KaplanMeierFitter().fit(g["time_to_event_days"], g["event_observed"], label=arm)
-        sf = kmf.survival_function_.reset_index()
-        sf.columns = ["days", "survival"]
+        if HAS_LIFELINES:
+            kmf = KaplanMeierFitter().fit(g["time_to_event_days"], g["event_observed"], label=arm)
+            sf = kmf.survival_function_.reset_index()
+            sf.columns = ["days", "survival"]
+        else:
+            # Kaplan-Meier by hand: S(t) = prod(1 - d_i / n_i) over event times
+            ev = g.sort_values("time_to_event_days")
+            times, surv_p, n_at_risk, s_hat = [], [], len(ev), 1.0
+            for t, grp in ev.groupby("time_to_event_days"):
+                d = int(grp["event_observed"].sum())
+                if d:
+                    s_hat *= 1 - d / n_at_risk
+                times.append(t)
+                surv_p.append(s_hat)
+                n_at_risk -= len(grp)
+            sf = pd.DataFrame({"days": times, "survival": surv_p})
         sf["treatment"] = arm
         km_out.append(sf)
     km = pd.concat(km_out, ignore_index=True)
@@ -165,5 +208,6 @@ def analyze(cohort: pd.DataFrame, cfg: dict, storage, manifest) -> dict:
                     crude_or=round(results["crude"]["or"], 3),
                     adjusted_or=round(results["adjusted_logistic"]["or"], 3),
                     iptw_or=round(results["iptw"]["or"], 3),
-                    cox_hr=round(results["cox"]["hr"], 3))
+                    cox_hr=round(results["cox"]["hr"], 3),
+                    cox_fitter=results["cox"]["fitter"])
     return results

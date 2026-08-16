@@ -1,8 +1,9 @@
 """Tests for the Lambda preflight handler.
 
-boto3 is stubbed: the handler's S3 read is monkeypatched, so these run in CI
-without AWS credentials. What is being tested is the decision logic — which
-inputs halt the pipeline and which merely warn.
+boto3 is stubbed and the S3 read is monkeypatched, so these run in CI without
+AWS credentials. What is under test is the decision logic: which inputs halt
+the pipeline, which merely warn, and whether the completion marker fans out to
+all five tables rather than being validated as if it were data.
 """
 from __future__ import annotations
 
@@ -19,69 +20,81 @@ if "boto3" not in sys.modules:
 sys.path.insert(0, "infra/lambda_preflight")
 import handler  # noqa: E402
 
-HEADER = "patient_id,medication,injection_date,eye,site_id"
-ROWS = "\n".join(f"P{i},Drug A,2024-01-01,OD,SITE_01" for i in range(20))
+
+def _good(table: str, n: int = 20) -> str:
+    cols = sorted(handler.EXPECTED_COLUMNS[table])
+    return ",".join(cols) + "\n" + "\n".join(",".join("x" for _ in cols) for _ in range(n))
 
 
-@pytest.fixture(autouse=True)
-def _stub_s3(monkeypatch):
-    monkeypatch.setattr(handler, "_read_head", lambda b, k, max_bytes=1_000_000: FILES[k])
+@pytest.fixture
+def files(monkeypatch):
+    f = {f"raw/{t}/{t}.csv": _good(t) for t in handler.EXPECTED_COLUMNS}
+    monkeypatch.setattr(handler, "_read_head", lambda b, k, max_bytes=1_000_000: f[k])
+    return f
 
 
-FILES = {
-    "raw/injections/ok.csv": f"{HEADER}\n{ROWS}",
-    "raw/injections/missing.csv": "patient_id,medication,site_id\nP1,Drug A,SITE_01",
-    "raw/injections/drift.csv": f"{HEADER},lot_number\n" + "\n".join(
-        f"P{i},Drug A,2024-01-01,OD,SITE_01,LOT-1{i}" for i in range(20)),
-    "raw/injections/empty.csv": "",
-    "raw/injections/thin.csv": f"{HEADER}\nP1,Drug A,2024-01-01,OD,SITE_01",
-    "raw/unknown/x.csv": f"{HEADER}\n{ROWS}",
-}
-
-
-def _run(key):
+def _run(key="raw/_COMPLETE"):
     return handler.handler({"bucket": "b", "key": key}, None)
 
 
-def test_well_formed_file_passes():
-    assert _run("raw/injections/ok.csv")["status"] == "PASS"
+def test_marker_fans_out_to_every_table(files):
+    """The marker means 'all extracts uploaded', not 'validate this object'.
 
-
-def test_missing_required_column_halts():
-    r = _run("raw/injections/missing.csv")
-    assert r["status"] == "FAIL"
-    assert any(c["check"] == "required_columns" and c["status"] == "FAIL" for c in r["checks"])
-
-
-def test_schema_drift_warns_but_does_not_halt():
-    """An added column is the site changing its export, not corruption.
-
-    Blocking on it would halt the pipeline every time a site adds a field.
+    Validating the marker itself was the original bug: a zero-byte file with
+    no table name and no .csv extension fails every check and halts the run.
     """
-    r = _run("raw/injections/drift.csv")
+    r = _run()
+    assert r["triggered_by_marker"] is True
+    assert len(r["tables"]) == 5
+    assert r["status"] == "PASS"
+
+
+def test_one_bad_table_fails_the_whole_gate(files):
+    files["raw/injections/injections.csv"] = "patient_id,medication,site_id\nP1,Drug A,SITE_01"
+    r = _run()
+    assert r["status"] == "FAIL"
+    bad = [t for t in r["tables"] if t["status"] == "FAIL"]
+    assert [t["table"] for t in bad] == ["injections"]
+
+
+def test_schema_drift_warns_but_does_not_halt(files):
+    """An added column is a site changing its export, not corruption."""
+    cols = sorted(handler.EXPECTED_COLUMNS["injections"]) + ["lot_number"]
+    files["raw/injections/injections.csv"] = ",".join(cols) + "\n" + "\n".join(
+        ",".join("x" for _ in cols) for _ in range(20))
+    r = _run()
     assert r["status"] == "PASS"
     assert "no_unexpected_columns" in r["warnings"]
 
 
-def test_empty_file_halts():
-    assert _run("raw/injections/empty.csv")["status"] == "FAIL"
+def test_empty_file_halts(files):
+    files["raw/patients/patients.csv"] = ""
+    assert _run()["status"] == "FAIL"
 
 
-def test_truncated_upload_halts():
-    assert _run("raw/injections/thin.csv")["status"] == "FAIL"
+def test_truncated_upload_halts(files):
+    cols = sorted(handler.EXPECTED_COLUMNS["patients"])
+    files["raw/patients/patients.csv"] = ",".join(cols) + "\n" + ",".join("x" for _ in cols)
+    assert _run()["status"] == "FAIL"
 
 
-def test_unrecognised_path_halts():
+def test_single_file_trigger_checks_only_that_file(files):
+    r = _run("raw/patients/patients.csv")
+    assert r["triggered_by_marker"] is False
+    assert len(r["tables"]) == 1
+
+
+def test_unrecognised_path_halts(files):
+    files["raw/unknown/x.csv"] = _good("patients")
     r = _run("raw/unknown/x.csv")
     assert r["status"] == "FAIL"
-    assert r["table"] is None
+    assert r["tables"][0]["table"] is None
 
 
-def test_fingerprint_is_order_independent():
-    a = _run("raw/injections/ok.csv")["schema_fingerprint"]
-    FILES["raw/injections/reordered.csv"] = (
-        "site_id,eye,injection_date,medication,patient_id\n"
-        + "\n".join("SITE_01,OD,2024-01-01,Drug A,P1" for _ in range(20))
-    )
-    b = _run("raw/injections/reordered.csv")["schema_fingerprint"]
-    assert a == b
+def test_fingerprint_is_order_independent(files):
+    a = _run()["tables"][0]["schema_fingerprint"]
+    t = _run()["tables"][0]["table"]
+    cols = list(reversed(sorted(handler.EXPECTED_COLUMNS[t])))
+    files[f"raw/{t}/{t}.csv"] = ",".join(cols) + "\n" + "\n".join(
+        ",".join("x" for _ in cols) for _ in range(20))
+    assert _run()["tables"][0]["schema_fingerprint"] == a

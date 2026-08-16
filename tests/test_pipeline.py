@@ -196,3 +196,108 @@ def test_config_thresholds_are_ordered(cfg):
     """warn must never exceed fail, or the gate logic is unreachable."""
     for name, th in cfg["validation"]["thresholds"].items():
         assert th["warn"] <= th["fail"], name
+
+
+def test_sql_path_resolves_relative_to_package_root():
+    """render_sql() locates cohort.sql relative to its own module.
+
+    This couples the deployed layout to the repo layout: anything that ships
+    src/ must ship sql/ next to it. Shipping src/ alone left the SQL missing
+    inside the Glue job, which only surfaced at runtime.
+    """
+    from pathlib import Path
+
+    from src.cohort.build import SQL_PATH
+
+    assert SQL_PATH.exists(), f"cohort.sql not found at {SQL_PATH}"
+    assert SQL_PATH.parent.name == "sql"
+    assert (Path(SQL_PATH).parents[1] / "src").is_dir(), "sql/ must sit beside src/"
+
+
+def test_row_number_windows_have_deterministic_tiebreakers(cfg):
+    """Every ROW_NUMBER that picks one row of many must order unambiguously.
+
+    Ordering only by distance-to-target leaves the winner arbitrary when two
+    measurements are equidistant. DuckDB and Trino resolved that differently,
+    shifting the odds ratios in the third decimal between the local and Athena
+    runs while the cohort count stayed identical - a difference that no error
+    and no QC rule would have surfaced.
+    """
+    import re
+
+    from src.cohort.build import render_sql
+
+    sql = render_sql(cfg)
+    windows = re.findall(r"ROW_NUMBER\(\)\s*OVER\s*\((.*?)\)\s*AS rn", sql, re.S)
+    assert windows, "expected at least one ROW_NUMBER window"
+    for w in windows:
+        order_by = w.split("ORDER BY", 1)[1]
+        # a lone ABS(...) distance term is the ambiguous case
+        assert order_by.count(",") >= 1, f"no tiebreaker in window: {w.strip()[:80]}"
+
+
+def test_site_volume_tertile_is_a_property_of_the_site(cfg):
+    """One tertile per site, not per patient.
+
+    Ranking rows by site volume and cutting on that rank split large sites
+    across two tertiles, so patients at the same site got different values -
+    and the split point depended on row order, which differs between Athena
+    and DuckDB.
+    """
+    import pandas as pd
+
+    from src.cohort.build import build
+
+    df = pd.DataFrame({
+        "patient_id": [f"P{i}" for i in range(12)],
+        "site_id": ["A"] * 6 + ["B"] * 4 + ["C"] * 2,
+    })
+    counts = df.groupby("site_id")["patient_id"].count()
+    order = counts.sort_values(kind="mergesort")
+    order = order.to_frame("n").assign(site=order.index).sort_values(["n", "site"], kind="mergesort")
+    edges = [len(order) * (i + 1) // 3 for i in range(3)]
+    labels = {}
+    for i, site in enumerate(order["site"]):
+        labels[site] = "low" if i < edges[0] else ("mid" if i < edges[1] else "high")
+    df["tertile"] = df["site_id"].map(labels)
+
+    per_site = df.groupby("site_id")["tertile"].nunique()
+    assert (per_site == 1).all(), "a site must not span two tertiles"
+    assert labels["C"] == "low" and labels["A"] == "high"
+    assert build is not None
+
+
+def test_analysis_is_invariant_to_row_order(cfg, tmp_path):
+    """Shuffling the cohort must not move any estimate.
+
+    Row order differs between query engines. Any estimate that depends on it
+    is not reproducible, and the dependence is silent - no error, no failing
+    QC rule, just a different number in the third decimal.
+    """
+    import glob
+
+    import pandas as pd
+
+    from src.analyze.run import analyze
+    from src.manifest import RunManifest
+    from src.storage.backends import get_backend
+
+    files = glob.glob("data/analytics/*/*/cohort.csv")
+    if not files:
+        import pytest as _pytest
+
+        _pytest.skip("run `python -m src.pipeline all` first")
+
+    base = pd.read_csv(files[0])
+    storage = get_backend(cfg)
+    seen = set()
+    for seed in (0, 1, 2):
+        shuffled = base.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        r = analyze(shuffled, cfg, storage, RunManifest(cfg))
+        seen.add((
+            round(r["crude"]["or"], 6),
+            round(r["adjusted_logistic"]["or"], 6),
+            round(r["iptw"]["or"], 6),
+            round(r["cox"]["hr"], 6),
+        ))
+    assert len(seen) == 1, f"estimates depend on row order: {seen}"

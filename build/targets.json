@@ -1,0 +1,1 @@
+[{"Id": "statemachine", "Arn": "arn:aws:states:us-east-1:533267270245:stateMachine:iris-rwe-pipeline", "RoleArn": "arn:aws:iam::533267270245:role/iris-eventbridge-role", "InputTransformer": {"InputPathsMap": {"bucket": "$.detail.bucket.name", "key": "$.detail.object.key"}, "InputTemplate": "{\"bucket\": <bucket>, \"key\": <key>}"}}]
