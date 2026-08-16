@@ -2,7 +2,7 @@
 
 Executable form: [`sql/cohort.sql`](../sql/cohort.sql). Parameters:
 [`config/study.yaml`](../config/study.yaml). **If this document and the SQL
-disagree, that is a bug** — the SQL is generated from the same config values
+disagree, that is a bug**, the SQL is generated from the same config values
 listed here, and any change to a criterion should update both in one pull
 request.
 
@@ -13,7 +13,7 @@ Retrospective **new-user, active-comparator** cohort study.
 The active-comparator design (Drug A vs Drug B, rather than Drug A vs
 untreated) is deliberate. Comparing treated with untreated patients in EHR
 data confounds the treatment effect with whatever made a clinician decide to
-treat at all — usually disease severity and access to care. Comparing two
+treat at all, usually disease severity and access to care. Comparing two
 drugs used for the same indication puts both arms on the same side of that
 decision.
 

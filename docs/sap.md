@@ -18,7 +18,7 @@ clinically meaningful improvement within the follow-up window.
 
 ## Causal structure and the adjustment set
 
-The adjustment set is not a list of "available covariates" — it is read off an
+The adjustment set is not a list of "available covariates". It is read off an
 assumed causal structure. Those assumptions are stated here so a reader can
 disagree with them specifically rather than in general.
 
@@ -35,7 +35,7 @@ graph LR
   Y --> R
 ```
 
-### Confounders — adjusted
+### Confounders, adjusted
 
 | Variable | Arrow to treatment | Arrow to outcome |
 |---|---|---|
@@ -48,20 +48,20 @@ graph LR
 so it is close to a precision covariate rather than a confounder here.
 
 Baseline severity is the dominant one. Its unweighted standardized mean
-difference is ~0.62 — far above the 0.1 adequacy threshold — and it alone
+difference is ~0.62, far above the 0.1 adequacy threshold, and it alone
 accounts for most of the gap between the crude and adjusted estimates.
 
 
 ### Conditional versus marginal: the odds ratio is non-collapsible
 
 The adjusted regression coefficient (OR ~ 2.17) and the IPTW estimate
-(OR ~ 1.75) look like disagreement. They are not — they are different
+(OR ~ 1.75) look like disagreement. They are not, they are different
 estimands.
 
 A regression coefficient is a **conditional** odds ratio: the effect within
 strata of the covariates. IPTW targets a **marginal** odds ratio: the effect in
 the population as a whole. Unlike the risk difference and risk ratio, the odds
-ratio is **non-collapsible** — conditioning on a strongly prognostic covariate
+ratio is **non-collapsible**, conditioning on a strongly prognostic covariate
 inflates the conditional OR relative to the marginal one *even when there is no
 confounding at all*. With baseline logMAR carrying an SMD of ~0.62, that gap is
 substantial.
@@ -85,11 +85,11 @@ distinction would invite a reader to conclude the analysis is unstable.
 6.5 percentage points in the probability of meaningful improvement is
 interpretable and collapsible; an odds ratio of either 2.17 or 1.75 is neither.
 
-Point estimates only — valid intervals for the standardised quantities require
+Point estimates only. Valid intervals for the standardised quantities require
 a bootstrap that resamples the whole fitting procedure, which is not
 implemented.
 
-### Mediator — deliberately NOT adjusted in the primary analysis
+### Mediator, deliberately NOT adjusted in the primary analysis
 
 `injection_count_yr1` is measured after index and lies on the path
 `treatment -> injection count -> outcome`. Both arrows are strongly present in
@@ -106,11 +106,11 @@ Conditioning on it blocks the indirect path and attenuates the estimate:
 Roughly 10% of the apparent benefit operates through more frequent injection.
 That is a real part of what the treatment does, and the primary estimand
 includes it. An earlier version of this plan adjusted for the mediator in the
-outcome model while excluding it from the propensity model — an internal
+outcome model while excluding it from the propensity model, an internal
 inconsistency that quietly reported a direct effect as though it were the
 treatment effect. Both are now reported and labelled.
 
-### Collider — a known limitation, not fixed by adjustment
+### Collider, a known limitation, not fixed by adjustment
 
 Cohort entry requires a 12-month acuity measurement. Retention is not random:
 it falls from 95.1% in the best baseline-severity quartile to 88.8% in the
@@ -132,24 +132,24 @@ residual confounding would need to be to explain the result away.
 
 ## Analysis sequence
 
-1. **Table 1** — baseline characteristics by arm, with standardized mean
+1. **Table 1**, baseline characteristics by arm, with standardized mean
    differences rather than p-values. A p-value comparing baseline
    characteristics in an observational cohort tests a hypothesis nobody holds;
    the SMD reports the magnitude of imbalance, which is what actually matters
    for confounding.
 
-2. **Crude estimate** — unadjusted logistic regression. **Reported alongside
+2. **Crude estimate**, unadjusted logistic regression. **Reported alongside
    the adjusted estimate, always.** In this cohort the crude and adjusted
    estimates differ by roughly a factor of two; presenting only the adjusted
    one conceals how much of the result is coming from the model rather than
    from the data.
 
-3. **Multivariable logistic regression** — adjusted for the confounder set
+3. **Multivariable logistic regression**, adjusted for the confounder set
    only (age, sex, race, baseline logMAR, site volume tertile). The
    coefficient is a conditional OR; g-computation over the same model gives
    the marginal contrast, plus the risk difference and risk ratio.
 
-4. **IPTW** — stabilized weights from a propensity model, with weights trimmed
+4. **IPTW**, stabilized weights from a propensity model, with weights trimmed
    at the 99th percentile. Balance assessed by SMD before and after weighting,
    with 0.1 as the conventional adequacy threshold. Robust or bootstrap
    standard errors are required for valid inference; the naive CI is not
@@ -158,12 +158,12 @@ residual confounding would need to be to explain the result away.
    The propensity model uses the same confounder set as the outcome model. No
    post-treatment variable appears in either.
 
-4b. **Controlled direct effect (secondary)** — the primary model plus
+4b. **Controlled direct effect (secondary)**, the primary model plus
    `injection_count_yr1`. Reported separately and explicitly labelled, because
    an adjusted estimate that silently conditions on a mediator is easy to
    mistake for the treatment effect.
 
-5. **Time to event** — Kaplan-Meier by arm and adjusted Cox proportional
+5. **Time to event**, Kaplan-Meier by arm and adjusted Cox proportional
    hazards. The PH assumption is tested (`cox.zph`) and the result reported
    whether or not it holds; a violated PH assumption means the hazard ratio is
    a weighted average over follow-up rather than a constant effect.
