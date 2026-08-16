@@ -95,22 +95,74 @@ def analyze(cohort: pd.DataFrame, cfg: dict, storage, manifest) -> dict:
         "p": float(crude.pvalues["exposed"]),
     }
 
-    # -- multivariable logistic -------------------------------------------
+    # -- multivariable logistic: TOTAL effect ------------------------------
+    # Confounders only. Post-treatment variables are excluded here by design:
+    # the primary estimand is the total effect of treatment, which includes
+    # whatever the treatment achieves by changing how often the eye is
+    # injected. See the DAG in docs/sap.md.
+    def _term(c):
+        return f"C({c})" if c in ("sex", "race", "site_volume_tertile") else c
+
     formula = "improved_12mo ~ exposed + " + " + ".join(
-        c if c not in ("sex", "race", "site_volume_tertile") else f"C({c})"
-        for c in covars if c in df.columns
+        _term(c) for c in covars if c in df.columns
     )
     adj = smf.glm(formula, data=df, family=sm.families.Binomial()).fit()
     results["adjusted_logistic"] = {
         "formula": formula,
+        "estimand": "total effect",
         "or": float(np.exp(adj.params["exposed"])),
         "ci_low": float(np.exp(adj.conf_int().loc["exposed", 0])),
         "ci_high": float(np.exp(adj.conf_int().loc["exposed", 1])),
         "p": float(adj.pvalues["exposed"]),
     }
 
+    # -- g-computation: marginal effects from the same model ----------------
+    # The regression coefficient is a CONDITIONAL odds ratio. The odds ratio is
+    # non-collapsible: conditioning on a strong prognostic covariate inflates
+    # it relative to the marginal OR even with no confounding whatsoever. With
+    # baseline logMAR carrying an SMD of ~0.62 that gap is large, and it is why
+    # the adjusted OR (~2.17) sits well above the IPTW OR (~1.75) without the
+    # two estimators actually disagreeing.
+    #
+    # Standardising the fitted model over the observed covariate distribution
+    # recovers a marginal contrast comparable to IPTW. Risk difference and risk
+    # ratio are collapsible and are usually the more communicable summaries.
+    d1, d0 = df.copy(), df.copy()
+    d1["exposed"], d0["exposed"] = 1, 0
+    r1, r0 = float(adj.predict(d1).mean()), float(adj.predict(d0).mean())
+    results["g_computation"] = {
+        "estimand": "marginal total effect (standardised over observed covariates)",
+        "risk_treated": r1,
+        "risk_untreated": r0,
+        "risk_difference": r1 - r0,
+        "risk_ratio": r1 / r0,
+        "marginal_or": (r1 / (1 - r1)) / (r0 / (1 - r0)),
+        "note": "point estimates only; bootstrap required for valid intervals",
+    }
+
+    # -- secondary: controlled direct effect --------------------------------
+    # Adding the mediator answers a different question - the effect of
+    # treatment NOT operating through injection frequency. Reported separately
+    # and labelled, because the two are routinely conflated: adjusting for a
+    # mediator and calling the result "the adjusted effect" understates the
+    # treatment's total benefit.
+    mediators = [m for m in a.get("mediators", []) if m in df.columns]
+    if mediators:
+        f_direct = formula + " + " + " + ".join(_term(m) for m in mediators)
+        direct = smf.glm(f_direct, data=df, family=sm.families.Binomial()).fit()
+        results["direct_effect_logistic"] = {
+            "formula": f_direct,
+            "estimand": "controlled direct effect (mediator held fixed)",
+            "mediators_adjusted": mediators,
+            "or": float(np.exp(direct.params["exposed"])),
+            "ci_low": float(np.exp(direct.conf_int().loc["exposed", 0])),
+            "ci_high": float(np.exp(direct.conf_int().loc["exposed", 1])),
+            "p": float(direct.pvalues["exposed"]),
+        }
+
     # -- IPTW --------------------------------------------------------------
-    X = _design(df, [c for c in covars if c != "injection_count_yr1"])
+    # covars is already confounders-only, so the PS model needs no special case
+    X = _design(df, covars)
     ps_model = sm.Logit(df["exposed"], sm.add_constant(X)).fit(disp=0)
     ps = ps_model.predict(sm.add_constant(X)).clip(0.02, 0.98)
     p_treat = df["exposed"].mean()
@@ -140,7 +192,7 @@ def analyze(cohort: pd.DataFrame, cfg: dict, storage, manifest) -> dict:
     surv = surv[surv["time_to_event_days"] > 0]
     cph_data = pd.concat([
         surv[["time_to_event_days", "event_observed", "exposed",
-              "age_at_index", "baseline_logmar", "injection_count_yr1"]],
+              "age_at_index", "baseline_logmar"]],
         pd.get_dummies(surv["sex"], prefix="sex", drop_first=True, dtype=float),
     ], axis=1)
     if HAS_LIFELINES:
@@ -205,6 +257,9 @@ def analyze(cohort: pd.DataFrame, cfg: dict, storage, manifest) -> dict:
                         json.dumps(results, indent=2, default=str).encode())
     manifest.record("analyze",
                     n=results["n_analyzed"],
+                    primary_estimand="total effect",
+                    confounders_adjusted=[c for c in covars if c in df.columns],
+                    mediators_excluded=a.get("mediators", []),
                     crude_or=round(results["crude"]["or"], 3),
                     adjusted_or=round(results["adjusted_logistic"]["or"], 3),
                     iptw_or=round(results["iptw"]["or"], 3),

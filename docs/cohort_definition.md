@@ -91,10 +91,12 @@ QC layer instead of silently entering the analysis.
 
 ## Known limitations
 
-1. **Informative missingness.** Patients with worse baseline acuity are more
-   likely to miss the 12-month visit. Requiring a follow-up measurement
-   therefore selects on a variable associated with the outcome. Quantified in
-   the SAP; a completers-only analysis is not unbiased.
+1. **Selection on a collider.** Requiring a 12-month acuity measurement
+   conditions on retention, which both treatment and outcome influence.
+   Retention falls from 95.1% in the best baseline-severity quartile to 88.8%
+   in the worst, and differs by arm (92.2% Drug A vs 93.2% Drug B). This opens
+   a collider path that adjustment for measured confounders does not close.
+   See the DAG in docs/sap.md.
 2. **No laterality handling in v1.** Patients may be treated bilaterally; the
    current cohort takes one eye per patient. Eye-level analysis with a
    patient-level random effect is the correct extension.

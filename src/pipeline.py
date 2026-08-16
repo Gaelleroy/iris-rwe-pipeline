@@ -144,9 +144,18 @@ def stage_analyze(cfg, storage, manifest, cohort=None):
     res = analyze(cohort, cfg, storage, manifest)
     ref = res["reference_treatment"]
     _log(f"  n={res['n_analyzed']:,}  (reference = {ref})")
-    for label, key in (("crude", "crude"), ("adjusted", "adjusted_logistic"), ("IPTW", "iptw")):
+    rows = [("crude", "crude"), ("adjusted", "adjusted_logistic"), ("IPTW", "iptw")]
+    if "direct_effect_logistic" in res:
+        rows.append(("direct", "direct_effect_logistic"))
+    for label, key in rows:
         v = res[key]
-        _log(f"  {label:<10} OR = {v['or']:.2f} [{v['ci_low']:.2f}, {v['ci_high']:.2f}]")
+        note = f"  <- {v['estimand']}" if "estimand" in v else ""
+        _log(f"  {label:<10} OR = {v['or']:.2f} [{v['ci_low']:.2f}, {v['ci_high']:.2f}]{note}")
+    if "g_computation" in res:
+        g = res["g_computation"]
+        _log(f"  {'g-comp':<10} marginal OR = {g['marginal_or']:.2f}, "
+             f"RD = {g['risk_difference']:+.3f}, RR = {g['risk_ratio']:.3f}")
+        _log("             (conditional OR > marginal OR is non-collapsibility, not disagreement)")
     c = res["cox"]
     _log(f"  {'Cox':<10} HR = {c['hr']:.2f} [{c['ci_low']:.2f}, {c['ci_high']:.2f}] "
          f"({c['n_events']:,} events)")

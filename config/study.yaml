@@ -104,6 +104,12 @@ cohort:
 # ---------------------------------------------------------------------------
 analysis:
   outcome_logmar_improvement_threshold: 0.1
-  covariates: [age_at_index, sex, race, baseline_logmar, injection_count_yr1, site_volume_tertile]
+  # Confounders only - variables the DAG (docs/sap.md) places on a backdoor
+  # path from treatment to outcome. Adjusted in the primary analysis.
+  covariates: [age_at_index, sex, race, baseline_logmar, site_volume_tertile]
+  # Post-treatment variables on the causal path. NOT adjusted in the primary
+  # analysis, which targets the total effect. Added only in the secondary
+  # direct-effect analysis, where the interpretation changes accordingly.
+  mediators: [injection_count_yr1]
   reference_treatment: "Drug B"
   alpha: 0.05
